@@ -186,7 +186,37 @@ function createWindow() {
   mainWindow.on('show', () => {
     startPolling();
     refreshTrayMenu();
+    restoreBoundsIfDrifted();
   });
+}
+
+// Workaround for Electron multi-monitor DPI bug: on a secondary display with
+// different scaling, hide → show can shrink the window because DIP bounds get
+// double-converted. Reassert the saved bounds whenever we re-show.
+// Ref: https://github.com/electron/electron/issues/10862
+function restoreBoundsIfDrifted() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const saved = getWindowBounds();
+  if (saved.x == null || saved.y == null) return;
+  const target = {
+    x: saved.x,
+    y: saved.y,
+    width: saved.width,
+    height: saved.height,
+  };
+  if (!isBoundsOnAnyDisplay(target)) return;
+  const current = mainWindow.getBounds();
+  const drifted =
+    current.width !== target.width ||
+    current.height !== target.height ||
+    current.x !== target.x ||
+    current.y !== target.y;
+  if (!drifted) return;
+  // Two-phase set: first position-only moves to the right display (activates
+  // that display's scale factor), then size. Applying both in one setBounds
+  // can still mis-scale on Windows multi-DPI setups.
+  mainWindow.setBounds({ x: target.x, y: target.y, width: current.width, height: current.height });
+  mainWindow.setBounds(target);
 }
 
 function buildTrayMenu() {
