@@ -2,6 +2,11 @@
 
 세로 사이드바 형태로 상주하는 크로스플랫폼 실시간 포트 모니터. Windows · macOS · Linux (+ WSL).
 
+<p align="center">
+  <img src="screenshot/dark.png" alt="Dark theme" width="280" />
+  <img src="screenshot/light.png" alt="Light theme" width="280" />
+</p>
+
 ## 주요 기술
 
 - Electron 30, React 18, TypeScript, Vite
