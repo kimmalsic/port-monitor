@@ -1,26 +1,33 @@
-; Custom NSIS include for Port Monitor — ensures clean uninstall.
-; electron-builder merges this into its generated installer.nsi.
+; Custom NSIS include for Port Monitor.
+; Goals:
+;   - Kill every running instance (including child processes) before touching files.
+;   - Clean uninstall: remove user data, shortcuts, registry, install dir.
+
+!macro killPortMonitor
+  DetailPrint "Closing running Port Monitor instances..."
+  ; Two passes with sleep: first kills the main tree, second catches any child
+  ; that respawned (tray/network service) and gives Windows time to release
+  ; file handles before NSIS' running-app check runs.
+  nsExec::Exec 'taskkill /F /T /IM "Port Monitor.exe"'
+  Sleep 800
+  nsExec::Exec 'taskkill /F /T /IM "Port Monitor.exe"'
+  Sleep 400
+!macroend
 
 !macro customInit
-  ; Ensure no running instance blocks uninstall/install
-  nsExec::Exec 'taskkill /IM "Port Monitor.exe" /F'
+  !insertmacro killPortMonitor
 !macroend
 
 !macro customInstall
-  ; Register global uninstall cleanup marker (idempotent)
   WriteRegStr HKCU "Software\PortMonitor" "InstallPath" "$INSTDIR"
 !macroend
 
 !macro customUnInit
-  ; Kill running app so file handles are released before removal.
-  nsExec::Exec 'taskkill /IM "Port Monitor.exe" /F'
+  !insertmacro killPortMonitor
 !macroend
 
 !macro customUnInstall
   ; --- Remove user data ---
-  ; electron-builder's deleteAppDataOnUninstall already removes
-  ; %APPDATA%\Port Monitor, but we also purge legacy/config paths
-  ; defensively so nothing is left behind.
   RMDir /r "$APPDATA\Port Monitor"
   RMDir /r "$APPDATA\port-monitor"
   RMDir /r "$LOCALAPPDATA\Port Monitor"
@@ -32,11 +39,11 @@
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PortMonitor"
   DeleteRegKey HKCU "Software\Classes\port-monitor"
 
-  ; --- Remove shortcuts (belt-and-braces; builder handles the standard ones) ---
+  ; --- Remove shortcuts ---
   Delete "$DESKTOP\Port Monitor.lnk"
   Delete "$SMPROGRAMS\Port Monitor.lnk"
   RMDir  "$SMPROGRAMS\Port Monitor"
 
-  ; --- Ensure install dir is gone if empty ---
+  ; --- Remove install dir ---
   RMDir /r "$INSTDIR"
 !macroend
