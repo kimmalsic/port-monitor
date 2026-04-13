@@ -121,28 +121,14 @@ function scheduleBoundsSave() {
 }
 
 function createWindow() {
-  const bounds = getWindowBounds();
-  const storedRect =
-    bounds.x != null && bounds.y != null
-      ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
-      : null;
-  // When using physical-pixel storage, validate against physical display geometry
-  // before conversion; for DIP storage the stored rect is already in DIPs.
-  const displayCheckRect = storedRect
-    ? USE_PHYSICAL_BOUNDS
-      ? storageToDipBounds(storedRect)
-      : storedRect
-    : null;
-  const hasSaved = displayCheckRect != null && isBoundsOnAnyDisplay(displayCheckRect);
-  const saved = hasSaved
-    ? displayCheckRect!
-    : computeWindowPosition(bounds.width, bounds.height, bounds.snap);
-
+  // Omit x/y/width/height from the constructor: on Windows multi-DPI setups,
+  // Electron interprets constructor bounds against the primary display's
+  // scale factor, so a window last seen on a 125% secondary monitor comes
+  // back smaller after a relaunch. We defer bounds to `ready-to-show`, where
+  // setBounds can use the correct target display.
   mainWindow = new BrowserWindow({
-    width: saved.width,
-    height: saved.height,
-    x: saved.x,
-    y: saved.y,
+    width: 280,
+    height: 700,
     minWidth: 220,
     minHeight: 400,
     maxWidth: 600,
@@ -151,7 +137,7 @@ function createWindow() {
     skipTaskbar: true,
     alwaysOnTop: store.get('alwaysOnTop'),
     backgroundColor: '#0e0f12',
-    show: !store.get('startHidden'),
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -214,23 +200,33 @@ function createWindow() {
   mainWindow.on('show', () => {
     startPolling();
     refreshTrayMenu();
-    restoreBoundsIfDrifted();
+    applyStoredBounds();
+  });
+
+  mainWindow.once('ready-to-show', () => {
+    applyStoredBounds();
+    if (!store.get('startHidden') && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+    }
   });
 }
 
-// Workaround for Electron multi-monitor DPI bug: on a secondary display with
-// different scaling, hide → show can shrink the window because DIP bounds get
-// re-scaled against the wrong display. We persist bounds in *physical screen
-// pixels* on Windows and convert back using the display actually containing
-// the rect; this produces the correct size regardless of show/hide cycles.
-// Refs:
-//   - https://github.com/electron/electron/issues/10862
-//   - https://github.com/electron/electron/issues/29605
-//   - https://github.com/electron/electron/pull/10972
-function restoreBoundsIfDrifted() {
+// Workaround for Electron multi-monitor DPI bug. The window shrinks when:
+//   (a) shown after hide on a display with a different scale factor, or
+//   (b) relaunched with bounds passed to the BrowserWindow constructor.
+// Fix: create the window at a default size on the primary display (no x/y in
+// the constructor), then setBounds to the persisted rect after ready-to-show
+// and on every subsequent show. Bounds are stored in physical pixels on
+// Windows so screenToDipRect uses the *target* display's scale factor.
+// Refs: electron/electron#10862, #29605, PR #10972
+function applyStoredBounds() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const saved = getWindowBounds();
-  if (saved.x == null || saved.y == null) return;
+  if (saved.x == null || saved.y == null) {
+    const pos = computeWindowPosition(saved.width, saved.height, saved.snap);
+    mainWindow.setBounds(pos);
+    return;
+  }
   const stored = {
     x: saved.x,
     y: saved.y,
@@ -238,16 +234,23 @@ function restoreBoundsIfDrifted() {
     height: saved.height,
   };
   const targetDip = storageToDipBounds(stored);
-  if (!isBoundsOnAnyDisplay(targetDip)) return;
-  // Two-phase: first position-only, so the window migrates to the target
-  // display and picks up that display's scale factor before its size is set.
+  if (!isBoundsOnAnyDisplay(targetDip)) {
+    const pos = computeWindowPosition(saved.width, saved.height, saved.snap);
+    mainWindow.setBounds(pos);
+    return;
+  }
+  // Two-phase: move first so Windows migrates the window to the target
+  // display (engaging its scale factor), then resize. One-shot setBounds can
+  // still mis-scale on a fresh BrowserWindow instance.
   const current = mainWindow.getBounds();
-  mainWindow.setBounds({
-    x: targetDip.x,
-    y: targetDip.y,
-    width: current.width,
-    height: current.height,
-  });
+  if (current.x !== targetDip.x || current.y !== targetDip.y) {
+    mainWindow.setBounds({
+      x: targetDip.x,
+      y: targetDip.y,
+      width: current.width,
+      height: current.height,
+    });
+  }
   mainWindow.setBounds(targetDip);
 }
 
