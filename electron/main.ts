@@ -73,6 +73,31 @@ function computeWindowPosition(
   return { x, y, width, height: h };
 }
 
+// Windows' per-monitor DPI awareness: persist bounds in physical screen pixels
+// so that restoring on a display with a different scale factor produces the
+// correct size. Non-Windows platforms treat DIPs as the canonical unit.
+const USE_PHYSICAL_BOUNDS = process.platform === 'win32';
+
+function dipBoundsToStorage(
+  win: BrowserWindow,
+  bounds: { x: number; y: number; width: number; height: number },
+) {
+  if (!USE_PHYSICAL_BOUNDS) return bounds;
+  return screen.dipToScreenRect(win, bounds);
+}
+
+function storageToDipBounds(stored: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}) {
+  if (!USE_PHYSICAL_BOUNDS) return stored;
+  // Passing null uses the display containing the rect — respects that
+  // display's scale factor, not the primary display's.
+  return screen.screenToDipRect(null as unknown as BrowserWindow, stored);
+}
+
 function isBoundsOnAnyDisplay(b: { x: number; y: number; width: number; height: number }): boolean {
   return screen.getAllDisplays().some((d) => {
     const a = d.workArea;
@@ -88,26 +113,29 @@ function isBoundsOnAnyDisplay(b: { x: number; y: number; width: number; height: 
 function scheduleBoundsSave() {
   if (boundsSaveTimer) clearTimeout(boundsSaveTimer);
   boundsSaveTimer = setTimeout(() => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    const [width, height] = mainWindow.getSize();
-    const [x, y] = mainWindow.getPosition();
-    setWindowBounds({ width, height, x, y });
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+    const dip = mainWindow.getBounds();
+    const stored = dipBoundsToStorage(mainWindow, dip);
+    setWindowBounds(stored);
   }, 500);
 }
 
 function createWindow() {
   const bounds = getWindowBounds();
-  const hasSaved =
-    bounds.x != null &&
-    bounds.y != null &&
-    isBoundsOnAnyDisplay({
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    });
+  const storedRect =
+    bounds.x != null && bounds.y != null
+      ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+      : null;
+  // When using physical-pixel storage, validate against physical display geometry
+  // before conversion; for DIP storage the stored rect is already in DIPs.
+  const displayCheckRect = storedRect
+    ? USE_PHYSICAL_BOUNDS
+      ? storageToDipBounds(storedRect)
+      : storedRect
+    : null;
+  const hasSaved = displayCheckRect != null && isBoundsOnAnyDisplay(displayCheckRect);
   const saved = hasSaved
-    ? { x: bounds.x!, y: bounds.y!, width: bounds.width, height: bounds.height }
+    ? displayCheckRect!
     : computeWindowPosition(bounds.width, bounds.height, bounds.snap);
 
   mainWindow = new BrowserWindow({
@@ -192,31 +220,35 @@ function createWindow() {
 
 // Workaround for Electron multi-monitor DPI bug: on a secondary display with
 // different scaling, hide → show can shrink the window because DIP bounds get
-// double-converted. Reassert the saved bounds whenever we re-show.
-// Ref: https://github.com/electron/electron/issues/10862
+// re-scaled against the wrong display. We persist bounds in *physical screen
+// pixels* on Windows and convert back using the display actually containing
+// the rect; this produces the correct size regardless of show/hide cycles.
+// Refs:
+//   - https://github.com/electron/electron/issues/10862
+//   - https://github.com/electron/electron/issues/29605
+//   - https://github.com/electron/electron/pull/10972
 function restoreBoundsIfDrifted() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const saved = getWindowBounds();
   if (saved.x == null || saved.y == null) return;
-  const target = {
+  const stored = {
     x: saved.x,
     y: saved.y,
     width: saved.width,
     height: saved.height,
   };
-  if (!isBoundsOnAnyDisplay(target)) return;
+  const targetDip = storageToDipBounds(stored);
+  if (!isBoundsOnAnyDisplay(targetDip)) return;
+  // Two-phase: first position-only, so the window migrates to the target
+  // display and picks up that display's scale factor before its size is set.
   const current = mainWindow.getBounds();
-  const drifted =
-    current.width !== target.width ||
-    current.height !== target.height ||
-    current.x !== target.x ||
-    current.y !== target.y;
-  if (!drifted) return;
-  // Two-phase set: first position-only moves to the right display (activates
-  // that display's scale factor), then size. Applying both in one setBounds
-  // can still mis-scale on Windows multi-DPI setups.
-  mainWindow.setBounds({ x: target.x, y: target.y, width: current.width, height: current.height });
-  mainWindow.setBounds(target);
+  mainWindow.setBounds({
+    x: targetDip.x,
+    y: targetDip.y,
+    width: current.width,
+    height: current.height,
+  });
+  mainWindow.setBounds(targetDip);
 }
 
 function buildTrayMenu() {
@@ -314,7 +346,9 @@ function applySnap(snap: Settings['window']['snap']) {
   const display = screen.getDisplayMatching(currentBounds) ?? screen.getPrimaryDisplay();
   const pos = computeWindowPosition(currentBounds.width, currentBounds.height, snap, display);
   mainWindow.setBounds(pos);
-  setWindowBounds({ x: pos.x, y: pos.y });
+  // Store in the same unit (physical pixels on Windows) as the debounced saver.
+  const stored = dipBoundsToStorage(mainWindow, pos);
+  setWindowBounds({ x: stored.x, y: stored.y, width: stored.width, height: stored.height });
   broadcastSettings();
 }
 
